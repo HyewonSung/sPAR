@@ -304,10 +304,7 @@ This artifact is released under the **Apache License 2.0**; see `LICENSE`.
 We chose Apache 2.0 because the FHE backend is derived from the TFHE library (version 1.0), which is itself Apache 2.0 licensed. 
 `LICENSE` also records what comes from TFHE and what was changed:
 
-* `spqlios/` — the SPQLIOS negacyclic FFT from TFHE v1.0. Four files are
-  unmodified; three gained 64-bit torus entry points alongside the original
-  32-bit ones.
-* `src/64header.h` — derived from TFHE v1.0, re-expressed for 64-bit torus
-  elements and reduced to the routines sPAR needs.
+* `spqlios/` — the SPQLIOS negacyclic FFT routines from TFHE v1.0, with three files extended to support 64-bit torus arithmetic.
+* `src/64header.h` — derived from TFHE v1.0 and adapted to 64-bit torus arithmetic for the operations required by sPAR.
 
 Everything else is original work of the sPAR authors.
