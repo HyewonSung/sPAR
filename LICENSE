@@ -1,0 +1,26 @@
+Copyright 2026 - Debajyoti Das, Jeongeun Park, Hyewon Sung
+
+
+
+This repository includes code from the TFHE library, version 1.0
+(https://github.com/tfhe/tfhe), Copyright 2016 - Nicolas Gama
+<nicolas.gama@gmail.com> et al., which is licensed under the Apache
+License, Version 2.0.
+
+So you may not use this file except in compliance with the License.
+You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 
+
+  spqlios/       The SPQLIOS negacyclic FFT, from TFHE v1.0
+                 (src/libtfhe/fft_processors/spqlios/).
+                 spqlios-fft-fma.s, spqlios-ifft-fma.s, spqlios-fft-impl.cpp
+                 and spqlios-fft.h are unmodified.
+                 fft_processor_spqlios.cpp, lagrangehalfc_impl.h and
+                 lagrangehalfc_impl_fma.s have been modified: 64-bit torus
+                 entry points (execute_direct_torus64 / execute_reverse_torus64)
+                 were added alongside the original 32-bit ones.
+
+  src/64header.h Derived from TFHE v1.0. The ciphertext and polynomial
+                 operations were re-expressed to operate on 64-bit torus
+                 elements, and only the routines needed by sPAR were kept.
+
+All other files in this repository are original work of the sPAR authors.
