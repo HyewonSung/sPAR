@@ -1,10 +1,13 @@
-# sPAR: (Somewhat) Practical Anonymous Router — Artifact
+# sPAR: (Somewhat) Practical Anonymous Router 
 
-Proof-of-concept implementation of **sPAR** : an anonymous router built on fully homomorphic encryption (FHE) over a single untrusted server. 
 
-This artifact reproduces the performance numbers reported in the paper (Tables 4 and 5).
+This repository contains a TFHE-based proof-of-concept implementation of sPAR, an FHE-based anonymous router.
+It can be used to measure the performance of sPAR.
 
-The implementation is based on a TFHE backend adapted to 64-bit arithmetic, and all related functions are included in this artifact.
+Note that while preparing this artifact, we found a faster parameter set, which is now the default.
+Running the code with the parameters of the paper still yields numbers close to the tables in the paper, and this README describes how to run both the new and the original parameter sets.
+
+The implementation is based on a TFHE backend adapted to 64-bit arithmetic, and all related functions are included in this code.
 Therefore, there are no external dependencies beyond a C++ compiler with OpenMP.
 
 
@@ -46,7 +49,7 @@ src/
   spar_helper.cpp         client-side encryption and server-side extraction
   global_random.cpp       global RNG instance
 
-spqlios/                  SPQLIOS negacyclic FFT (sources and FMA assembly)
+spqlios/                  SPQLIOS negacyclic FFT 
 
 tests/
   test_spar_main.cpp      main experiment file, it runs the protocol one round and verifies the result
@@ -58,7 +61,7 @@ tests/
 
 ```bash
 ./build.sh 20                      # build for eta = 20 (~5 seconds)
-OMP_NUM_THREADS=4 ./build/spar_e20 # run one protocol round (~4 minutes)
+OMP_NUM_THREADS=4 ./build/spar_e20 # run one protocol round (~3 minutes)
 ```
 
 A successful run ends with:
@@ -69,12 +72,7 @@ A successful run ends with:
 
 
 ## 4. Building
-The main source code is located in `tests/test_spar_main.cpp`.
-
-Before running the experiments, the project must first be built.
-
 The user can specify the number of clients, denoted by `eta`, for each experiment. 
-The program is rebuilt according to the specified value of `eta`. 
 If no value is provided, the build script compiles the program for all default settings used in our experiments: `eta = 20, 40, 60, 80, 100`.
 
 For example, the provided script can be used as follows:
@@ -82,6 +80,7 @@ For example, the provided script can be used as follows:
 ```bash
 ./build.sh                 # build all five: eta = 20, 40, 60, 80, 100
 ./build.sh 20 100          # build only eta = 20 and eta = 100
+PRESET=paper ./build.sh    # parameter set of the submitted paper -> build/spar_e<E>_paper
 ```
 
 
@@ -92,33 +91,6 @@ On the reference machine (4 cores) this will take :
 | one-time SPQLIOS FFT objects | ~3 s |
 | each `eta` | ~3 s |
 | `./build.sh` from a clean checkout (all five) | ~20 s |
-| `./build.sh 20` with the FFT objects already built | ~3 s |
-
-The equivalent manual command is:
-
-```bash
-mkdir -p build
-
-# one-time: SPQLIOS FFT objects
-g++ -c -O3 -march=native -Ispqlios -I. spqlios/spqlios-fft-impl.cpp      -o spqlios/spqlios-fft-impl.o
-g++ -c -O3 -march=native -Ispqlios -I. spqlios/fft_processor_spqlios.cpp -o spqlios/fft_processor_spqlios.o
-g++ -c spqlios/spqlios-fft-fma.s        -o spqlios/spqlios-fft-fma.o
-g++ -c spqlios/spqlios-ifft-fma.s       -o spqlios/spqlios-ifft-fma.o
-g++ -c spqlios/lagrangehalfc_impl_fma.s -o spqlios/lagrangehalfc_impl_fma.o
-
-# the protocol, for eta = 20
-g++ -std=c++2a -O3 -w -DUSE_FFT -march=native \
-    -DETA=20 -DPARTY_COUNT=20 \
-    -Iinclude -I. -Ispqlios -fopenmp -no-pie \
-    spqlios/spqlios-fft-fma.o spqlios/spqlios-ifft-fma.o \
-    spqlios/spqlios-fft-impl.o spqlios/fft_processor_spqlios.o \
-    spqlios/lagrangehalfc_impl_fma.o \
-    src/global_random.cpp tests/test_spar_main.cpp \
-    -o build/spar_e20
-```
-
-Note that the protocol requires the number of clients to be equal to the number of buckets. 
-Therefore, `ETA` (the number of buckets) and `PARTY_COUNT` (the number of clients, with one message per client) must always be set to the same value.
 
 
 ## 5. Running
@@ -142,91 +114,40 @@ for s in 1 2 3 4 5; do OMP_NUM_THREADS=4 ./build/spar_e20 $s | tail -1; done
 
 The same commands can be used for `eta = 40, 60, 80, 100` by replacing spar_e20 with the corresponding executable, such as spar_e40, spar_e60, spar_e80, or spar_e100.
 
-Each execution performs one complete protocol round: setup, client encryption, homomorphic placing, oblivious sorting, partial/final decryption, and verification.
 
-### Print debug details
-The amount of runtime output is controlled by the `print_debug` flag in `tests/test_spar_main.cpp`, which is disabled by default.
 
-The default output already includes all information required to reproduce the tables in the paper and to verify correctness. 
-Enabling debug output additionally prints detailed per-message and per-bucket information.
+Each run prints the parameter header, the progress of each protocol step, the noise budget, the `END-TO-END` block (Table 5) and the `---- summary ----` block (Table 4), and ends with `PASS` or `FAIL`.
 
-The flag can be enabled at build time as follows:
-
-```bash
-./build.sh 20                                     # default (quiet)
-EXTRA_FLAGS=-DPRINT_DEBUG=1 ./build.sh 20     # verbose build
-```
-
-The difference between running with and without debug output is shown below:
-| | quiet (default) | verbose |
-|---|---|---|
-| parameter header | yes | yes |
-| setup / client:send / sorting timings | yes | yes |
-| `[server:write] done`, `[partial decryption] done` | yes | — |
-| `[keygen] gate bsk ...`, `[Server:Write] starts`, `[sort] ...` phase headers | — | yes |
-| `[msg N] choices = {...}` + per-message `p1a/p1b/p2/p3` breakdown | — | yes |
-| per-bucket `L-slots ... MATCH ? OK ... noise~...` | — | yes |
-| noise budget | yes | yes |
-| `END-TO-END` block (Table 5) | yes | yes |
-| `---- summary ----` block (Table 4) | yes | yes |
-| `PASS` / `FAIL` | yes | yes |
-
-The quiet log is a fixed ~50 lines whatever `eta` is, because the per-message and
-per-bucket lines are exactly what it drops. The verbose log grows by 8 lines per
-message, so `eta = 20` comes out at about 216 lines.
 
 
 ## 6. Reproducing the paper's tables
-All measurements reported in the paper were obtained using **4 OpenMP threads** on the reference machine (Intel Core i9-12900K, 4 vCPUs under WSL2).
+All measurements reported in the paper were obtained using 4 OpenMP threads on the reference machine (Intel Core i9-12900K, 4 vCPUs under WSL2).
 For the full hardware and software configuration of the experimental environment, please refer to the paper.
-
-Both Table 4 and Table 5 are obtained from the same five runs.
 
 Depending on the machine configuration and the OpenMP threading environment, the measured runtimes may differ from the values reported in the paper by a few percent.
 
 ### 6.1 Run the sweep
-The following commands run the experiments for `eta = 20, 40, 60, 80, 100` and generate the results corresponding to both Table 4 and Table 5.
-The output for each value of `eta` is stored in `logs/run_e<E>.log`.
+The following commands run the experiments for `eta = 20, 40, 60, 80, 100` and print the results corresponding to both Table 4 and Table 5.
 
-On our reference machine, running the full sweep takes approximately **3.7 hours** in total.
+On our reference machine, running the full sweep takes approximately **2.3 hours** in total.
 
 ```bash
 ./build.sh                                   # all five binaries
-mkdir -p logs
 for E in 20 40 60 80 100; do
-  OMP_NUM_THREADS=4 ./build/spar_e$E 2>&1 | tee logs/run_e$E.log
+  OMP_NUM_THREADS=4 ./build/spar_e$E
 done
 ```
 
-Every log must end with `======== PASS ========`.
+Every run must end with `======== PASS ========`.
 
 
 
-### 6.2 Table 4 
-For each value of eta, the values used in Table 4 are printed in the final ---- summary ---- block of the corresponding log.
-
-The following command extracts these blocks from all five runs:
-
-```bash
-for E in 20 40 60 80 100; do
-  echo "== eta=$E"
-  sed -n '/---- summary/,/^$/p' logs/run_e$E.log
-done
-```
+### 6.2 Table 4 / Table 5
+For each value of eta, the values used in Table 4 are printed in the final ---- summary ---- block of the output.
 
 
-### 6.3 Table 5 — end-to-end latency
-In each log, the block beginning with ================ END-TO-END (eta=20, 20 messages) ================ 
-reports the end-to-end runtime of one complete protocol round. 
-The value reported in the paper corresponds to the end-to-end runtime excluding setup, as shown in (Table 5, `Current backend`).
+The values used in Table 5 (`Current backend`) are printed with the block beginning with ================ END-TO-END (eta=20, 20 messages) ================ .
 
-
-Only the `Current backend` column is directly measured. 
-The **`Zama-projected`** column is estimated by replacing the measured bootstrap costs with Zama's reported GPU latency (0.796 ms per gate bootstrap), while keeping the remaining costs unchanged. 
-Circuit-bootstrap costs are scaled by the same factor.
-
-
-### 6.4 Correctness
 
 Independently of timing, every run verifies the round and ends with the verdict:
 
@@ -234,67 +155,62 @@ Independently of timing, every run verifies the round and ends with the verdict:
 ======== PASS ========
 ```
 
-`PASS` means that for every bucket, that the messages decrypted from it are exactly the ones the plaintext choice-of-three process would have placed there, and that every payload coefficient decrypts cleanly.
+`PASS` means that for every bucket, that the messages decrypted from it are exactly the ones the plaintext choice-of-three process would have placed there.
 
-The `noise budget` block reports the worst payload noise observed in the round against the decryption boundary `Delta/2 = 2^59`. 
-The margin is how many bits of headroom are left.
 
-A **verbose** build additionally shows the per-bucket evidence:
-
-```
-  bucket 0  L-slots(after sort): [0000] [514150] [78910] | answer: [0000] [514150] [78910] | MATCH ? OK | noise~2^51 (Delta/2=2^59)
-```
-
-* `MATCH ? OK` — the messages decrypted from the bucket equals the plaintext process would have placed there (`FAIL` otherwise).
-* `noise~2^51 (Delta/2=2^59)` — the largest observed noise magnitude in that bucket against the decryption boundary and the gap is the correctness margin.
+The `[noise budget]` line reports the worst payload noise observed in the round against the decryption boundary `Delta/2 = 2^59`, and the margin, i.e. how many bits of headroom are left. 
 
 
 
 ## 7. Parameters
 
-All parameters are defined in **`include/config.h`** and can be overridden at compile time using `-D`, without modifying the source code.
+All parameters are defined in **`include/config.h`**.
+Invalid combinations (e.g. `ETA != PARTY_COUNT`, or a gadget with `B^l > 2^64`) are rejected at compile time by the `static_assert` checks at the end of `config.h`.
 
-The default values are those used for the experiments in the paper. 
-They were selected so that the noise budget remains sufficient for a complete round with `eta = 100`, while the underlying LWE/RLWE instances meet the target security level.
+The default parameter set differs from the one in the paper.
+We found parameters that run faster and made them the default; the original parameter set of the paper can still be built with `PRESET=paper`.
 
-The noise parameters, gadget decompositions, and refresh periods are closely related. 
-Changing one of them may affect correctness or security, so the parameters below are grouped by how safely they can be modified.
+The table below shows how the parameters changed.
 
-### Fixed
+| Parameter | Macro | default | `PRESET=paper` |
+|---|---|---:|---:|
+| LWE dimension `n` | `LWE_N` | 1024 | 1024 |
+| encryption / evaluation-key / partial-decryption noise `sigma` | `SIGMA_LOG` | 2^-54 | 2^-54 |
+| key-switching noise `sigma_ksk` | `SIGMA_KSK_LOG` | 2^-26 | 2^-26 |
+| gate bootstrapping gadget `(B, l)` | `GATE_BG`, `GATE_L` | (2^24, 1) | (2^9, 3) |
+| `N -> n` key switching `(B, l)` | `KS_OUT_BASEBIT`, `KS_OUT_LEVELS` | (2^8, 2) | (2^8, 8) |
+| circuit-bootstrapping blind rotation `(B, l)` | `CB_PBS_BG`, `CB_PBS_L` | (2^10, 4) | (2^9, 5) |
+| circuit-bootstrapping output RGSW `(B, l)` | `OUT_BG`, `OUT_L` | (2^9, 3) | (2^9, 3) |
+| homomorphic-trace key levels | `CB_AKS_L` | 6 | 6 |
+| scheme-switching key levels | `CB_L_SS` | 5 | 6 |
+| refresh period of `hasWritten` (candidates) | `REFRESH_HW` | 72 | 18 |
+| refresh period of `I` (messages) | `REFRESH_I` | 32 | 8 |
 
-The ring dimension `N = 2048` is **not configurable** in the current implementation.
+The plaintext modulus `t = 2^4` and the ciphertext modulus `q = 2^64` are the same in both sets.
 
-The bundled SPQLIOS FFT backend is specialized for `N = 2048`, and several parts of the implementation assume this value. 
-Changing `N` therefore requires modifying the FFT backend as well.
+## 7.1 Updated Performance Results
 
-### Safe to change
+The following results were measured with the default parameters on the reference machine (4 OpenMP threads, one run per `eta`, all runs `PASS`).
 
-| Parameter | Constraint |
-|---|---|
-| `ETA`, `PARTY_COUNT` | **Must be set to the same value** and must be at least 3, since each client chooses 3 distinct candidate buckets. Larger values increase the running time. |
-| `SEED` | Can be set to any value. It can also be overridden at run time using `argv[1]`. |
-| `PRINT_DEBUG` | `0` or `1`; controls output verbosity only. |
+**Computation time of each step** :
 
-### Change with caution
+| `eta` | Client:Send<br>per message | Server:Write<br>per message | Partial Dec.<br>`3*eta` ciphertexts | Sorting<br>3 slots |
+|---:|---:|---:|---:|---:|
+| 20  | 0.002 s | 7.65 s  | 0.014 s | 0.183 s |
+| 40  | 0.002 s | 14.95 s | 0.028 s | 0.175 s |
+| 60  | 0.002 s | 22.11 s | 0.039 s | 0.168 s |
+| 80  | 0.002 s | 30.44 s | 0.055 s | 0.164 s |
+| 100 | 0.002 s | 36.32 s | 0.065 s | 0.172 s |
 
-The following parameters affect the noise growth or security of the scheme. 
-They can be changed to explore other parameter settings, but the guarantees and measurements reported in the paper no longer apply.
+**End-to-end latency per round**, excluding the one-time setup:
 
-| Parameter | Effect |
-|---|---|
-| `REFRESH_HW`, `REFRESH_I` | Increasing them too much may allow the control-bit noise to cross its decision boundary and cause incorrect placement. Smaller values refresh more often and are therefore slower. |
-| `LWE_N` | Dimension of the reduced LWE instance. Lowering it reduces the estimated security level and invalidates the 117-bit security setting used in the paper. |
-| `SIGMA_KSK_LOG` | Noise parameter of the `N -> n` key-switching key. Lower noise may weaken security, while higher noise reduces the available correctness margin. |
-| `CB_PBS_L`, `CB_AKS_L`, `CB_L_SS` | Gadget decomposition levels used in circuit bootstrapping. Changing them affects the circuit-bootstrap noise and running time. |
-| `KS_OUT_BASEBIT` | Must **divide 64**. The implementation checks `64 % basebit == 0` and aborts otherwise. |
-
-After changing any of these parameters, verify that the execution still ends with
-
-```
-======== PASS ========
-```
-
-
+| `eta` | end-to-end |
+|---:|---:|
+| 20  | 155.0 s  |
+| 40  | 606.1 s  |
+| 60  | 1340.9 s |
+| 80  | 2464.3 s |
+| 100 | 3675.6 s |
 
 
 ## 8. License
@@ -304,7 +220,10 @@ This artifact is released under the **Apache License 2.0**; see `LICENSE`.
 We chose Apache 2.0 because the FHE backend is derived from the TFHE library (version 1.0), which is itself Apache 2.0 licensed. 
 `LICENSE` also records what comes from TFHE and what was changed:
 
-* `spqlios/` — the SPQLIOS negacyclic FFT routines from TFHE v1.0, with three files extended to support 64-bit torus arithmetic.
-* `src/64header.h` — derived from TFHE v1.0 and adapted to 64-bit torus arithmetic for the operations required by sPAR.
+* `spqlios/` — the SPQLIOS negacyclic FFT from TFHE v1.0. Four files are
+  unmodified; three gained 64-bit torus entry points alongside the original
+  32-bit ones.
+* `src/64header.h` — derived from TFHE v1.0, re-expressed for 64-bit torus
+  elements and reduced to the routines sPAR needs.
 
 Everything else is original work of the sPAR authors.

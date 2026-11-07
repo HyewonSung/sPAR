@@ -1,50 +1,13 @@
 /*
- [Implementation code of sPAR]
- - Paper title: sPAR :  (Somewhat) Practical Anonymous Router
- - Authors: Debajyoti Das, Jeoungeun Park and Hyewon Sung
- 
- This is the main test code for sPAR.
- It executes one complete round of sPAR for eta clients (one message each).
- 
- Main test file proceeds as follows :
- 1. MPC-based setup : eta clients jointly generate the common pk and all evaluation keys.
-                      Each client keeps local secret key share s_i of master sk s.
- 2. Client:Send : Each client encrypts its payload and its three candidate bucket indices (one-hot RLWE queries) under the common pk.
- 3. Server:Write : The server extracts the encrypted selector bits from the queries (SampleExtract + key switching) 
-                   and runs HomPlacing (Algorithm 1) to insert each message into the least-loaded of its three candidate buckets.
- 4. Sorting : Each bucket is sorted obliviously
- 5. Decryption : The eta clients partially decrypt the bucket array and the server combines the shares to recover the messages.
- 
- If you run this program, you can check a per-step timing breakdown, the end-to-end round latency, and a correctness result(per-bucket multiset match).
- For more details, please refer to README.md.
-
  ---------------------------------------------------------------------------
                                      BUILD
  ---------------------------------------------------------------------------
- The number of clients is a compile-time constant, so the program is rebuilt for each eta. 
- Set ETA and PARTY_COUNT to the same value.
- 
  There are two ways of building this file, before running.
  One is for running the file with all eta = 20, 40, 60, 80, 100 and the other one is for just one eta.
  For example,
  - ./build.sh              # eta = 20, 40, 60, 80, 100   (~20 s)
  - ./build.sh 20           # just one                    
 
- which is equivalent to:
- -   mkdir -p build
-
- -   OBJ="spqlios/spqlios-fft-fma.o spqlios/spqlios-ifft-fma.o \
-          spqlios/spqlios-fft-impl.o spqlios/fft_processor_spqlios.o \
-          spqlios/lagrangehalfc_impl_fma.o"
- 
- -   for E in 20 40 60 80 100; do
-       g++ -std=c++2a -O3 -w -DUSE_FFT -march=native \
-           -DETA=$E -DPARTY_COUNT=$E \
-           -Iinclude -I. -Ispqlios -fopenmp -no-pie \
-           $OBJ src/global_random.cpp tests/test_spar_main.cpp \
-           -o build/spar_e$E
-     done
-  
  ---------------------------------------------------------------------------
                                 RUN
  ---------------------------------------------------------------------------
@@ -54,34 +17,13 @@
  Note that the number of OpenMP threads can be specified using OMP_NUM_THREADS
  The measurements reported in the paper were obtained using 4 OpenMP threads, so to reproduce the results in the paper, run:
 
- -   OMP_NUM_THREADS=4 ./build/spar_e20      # ~4-5  minutes
- -   OMP_NUM_THREADS=4 ./build/spar_e40      # ~16-17 minutes
- -   OMP_NUM_THREADS=4 ./build/spar_e60      # ~36-37 minutes
- -   OMP_NUM_THREADS=4 ./build/spar_e80      # ~64-65 minutes
- -   OMP_NUM_THREADS=4 ./build/spar_e100     # ~102-103 minutes
- 
- An optional command-line argument overrides the RNG seed:
- -  ./build/spar_e20 12345
+ -   OMP_NUM_THREADS=4 ./build/spar_e20      # ~3  minutes
+ -   OMP_NUM_THREADS=4 ./build/spar_e40      # ~10 minutes
+ -   OMP_NUM_THREADS=4 ./build/spar_e60      # ~22 minutes
+ -   OMP_NUM_THREADS=4 ./build/spar_e80      # ~41 minutes
+ -   OMP_NUM_THREADS=4 ./build/spar_e100     # ~61 minutes
 
  Each run ends with "======== PASS ========" if the round was correct.
-
- VERBOSITY
- The print_debug flag defaults to FALSE:
- the parameter header, progress of per protocol step, and the three types of summary (failure estimate, END-TO-END, summary).
- 
- Build with PRINT_DEBUG=1 to get the per-message and per-bucket detail:
- -   EXTRA_FLAGS=-DPRINT_DEBUG=1 ./build.sh 20
-
- 
- ---------------------------------------------------------------------------
-                                PARAMETERS
- ---------------------------------------------------------------------------
- The cryptographic parameters are fixed in the config macro block below and match the table in the paper. 
- Every LWE/RLWE instance arising in the implementation provides at least 117 bits of security (lattice estimator):
- 
-    GLWE  (N=2048, sigma=2^-54)                     119.7 bit
-    small key / output KSK (n=1024, sigma=2^-26)    117.7 bit
-    partial decryption share (N=2048, sigma=2^-54)  122.5 bit
  */
 
 #include <algorithm>
@@ -103,12 +45,6 @@
 #include "include/config.h"
 
 
-
-// print debug flag and is set to FALSE as default
-static const bool print_debug = (PRINT_DEBUG != 0);
-#define DBG(...) do { if (print_debug) printf(__VA_ARGS__); } while (0)
-
-static int flog2(uint64_t x) { int o = -1; while (x) { ++o; x >>= 1; } return o; }
 static uint64_t tabs(Torus64 x) { uint64_t a = (uint64_t)x, b = (uint64_t)(-x); return a < b ? a : b; }
 static uint64_t tdist(Torus64 a, Torus64 b) { return tabs((Torus64)((uint64_t)a - (uint64_t)b)); }
 
@@ -126,28 +62,32 @@ int main(int argc, char** argv) {
     const int    choices     = 3; // choice-of-three
     const int    lwe_n       = LWE_N; // reduced LWE dimension 
     const int    ks_out_bb   = KS_OUT_BASEBIT; // output-KSK decomposition base bits
-    const int    ks_out_lv   = 64 / ks_out_bb;    // -> levels
+    const int    ks_out_lv   = KS_OUT_LEVELS;  // -> levels (top ks_out_lv*ks_out_bb bits)
 
-    const int    sigma_big_log = -54;             
-    const int    sigma_ksk_log = SIGMA_KSK_LOG; // small-key output-KSK noise 
+    const int    sigma_big_log = SIGMA_LOG;     // encryption, evaluation keys, partial decryption
+    const int    sigma_ksk_log = SIGMA_KSK_LOG; // small-key output-KSK noise
     const double sigma_big   = std::pow(2.0, (double)sigma_big_log);
     const double sigma_ksk   = std::pow(2.0, (double)sigma_ksk_log);
-    const int    ks_bb = CB_KS_BB, ks_lv = 64 / CB_KS_BB;  // CB private-KS gadget (ks_bb*ks_lv=64)
 
-    Globals* env_out = new Globals(2048, 9, 3, 8, 256, 2048, 1); // gate/state/output ring
-    Globals* env_pbs = new Globals(2048, 9, CB_PBS_L, 8, 256, 2048, 1); // CB blind-rotation gadget
+    Globals* env_out  = new Globals(2048, OUT_BG, OUT_L, 8, 256, 2048, 1); // state/output ring (CB output gadget)
+    Globals* env_pbs  = new Globals(2048, CB_PBS_BG, CB_PBS_L, 8, 256, 2048, 1); // CB blind-rotation gadget
+    Globals* env_gate = new Globals(2048, GATE_BG, GATE_L, 8, 256, 2048, 1); // gate-PBS blind-rotation gadget
     const int N = env_out->N;
     const int t = 16; //plaintext modulus
     const Torus64 Delta = (Torus64)(UINT64_C(1) << 60);
-    const int PW = 8;
+    const int PW = PAYLOAD_WIDTH; 
     auto decode = [&](Torus64 x)->int { uint64_t u=(uint64_t)x+(uint64_t)(Delta/2); return (int)((u>>60)&(uint64_t)(t-1)); };
 
     printf("======== sPAR: one protocol round ========\n");
     printf("N=%d  n(gate PBS)=%d  parties=%d eta=%d slots=%d choices=%d\n", N, lwe_n, party_count, eta, slots, choices);
     printf("refresh hasWritten every %d cand, I every %d msgs\n", REFRESH_HW, REFRESH_I);
     printf("omp_max_threads=%d\n", omp_get_max_threads());
+    printf("sigma=2^%d (encryption, evaluation keys, partial decryption) ; payload=%d coefficients\n",
+           sigma_big_log, PW);
     printf("output-KSK: basebit=%d levels=%d ; sigma_ksk=2^%d (abs 2^%d)\n",
            ks_out_bb, ks_out_lv, sigma_ksk_log, sigma_ksk_log + 64);
+    printf("gadgets (bg,l): gate (%d,%d)  CB blind rotation (%d,%d)  CB output (%d,%d) ; aks_l=%d l_ss=%d\n",
+           GATE_BG, GATE_L, CB_PBS_BG, CB_PBS_L, OUT_BG, OUT_L, CB_AKS_L, CB_L_SS);
     if (eta < choices) { printf("[error] need eta >= choices (%d) for distinct choice-of-three\n", choices); return 2; }
 
     // ---- setup ----
@@ -167,9 +107,9 @@ int main(int argc, char** argv) {
         MPAggregateSecretKey64(s, sh.data(), (int)sh.size(), env_out); 
     }
     for (int i=0;i<N;++i){ 
-        env_out->tlwekey->coefs[i]=env_pbs->tlwekey->coefs[i]=s->coefs[i];
-        env_out->lwekey[i]=env_pbs->lwekey[i]=s->coefs[i];
-        env_out->in_key[i]=env_pbs->in_key[i]=s->coefs[i]; 
+        env_out->tlwekey->coefs[i]=env_pbs->tlwekey->coefs[i]=env_gate->tlwekey->coefs[i]=s->coefs[i];
+        env_out->lwekey[i]=env_pbs->lwekey[i]=env_gate->lwekey[i]=s->coefs[i];
+        env_out->in_key[i]=env_pbs->in_key[i]=env_gate->in_key[i]=s->coefs[i]; 
     }
 
     TLweSample64* common_pk = new TLweSample64(N);
@@ -187,15 +127,14 @@ int main(int argc, char** argv) {
         delete a; 
     }
 
-    DBG("\n[keygen] gate bsk + N->n finer output KSK(bb=%d) + CB bsk(l=%d) + HomTrace keys(aks_l=%d) + scheme-switch key(l_ss=%d) ...\n", ks_out_bb, env_pbs->l, CB_AKS_L, CB_L_SS);
     //setup for bts
     BootstrapContext64 boot; 
     Config_BTSContext64(&boot); 
-    Attach_BTSEnvToContext64(&boot, env_out);
+    Attach_BTSEnvToContext64(&boot, env_gate);
     ControlGateBootstrappingKey64 gate_bsk;
-    Gen_GateBTSKey64(&gate_bsk, parties, lwe_n, sigma_big, env_out);
+    Gen_GateBTSKey64(&gate_bsk, parties, lwe_n, sigma_big, env_gate);
     ControlOutputKeySwitchKey64 output_ksk;
-    Gen_OutputKSK_Basebit64(&output_ksk, parties, N, lwe_n, ks_out_bb, sigma_ksk, env_out);
+    Gen_OutputKSK_Basebit64(&output_ksk, parties, N, lwe_n, ks_out_bb, ks_out_lv, sigma_ksk, env_out);
     Attach_GatePBSKeysToBTSContext64(&boot, &gate_bsk, &output_ksk);
 
     ControlGateBootstrappingKey64 cb_bsk;
@@ -203,7 +142,7 @@ int main(int argc, char** argv) {
     
     // 2024/323 conversion keys: HomTrace automorphism-KS keys + one scheme-switch key RLWE'(s^2)
     const int aks_l = CB_AKS_L, l_ss = CB_L_SS;
-    AutoKsKey64**   aks     = AutoKsKeyGenAll(env_out, 1, aks_l);
+    AutoKsKey64**   aks     = AutoKsKeyGenAll(env_out, 1, aks_l, sigma_big);
     AutoKsKeyFFTa** aks_fft = AutoKsKeyAllToFFT(aks, env_out, 1);
     IntPolynomiala* s2 = new IntPolynomiala(N); 
     NegacyclicSquare(s2, s, N);
@@ -212,10 +151,7 @@ int main(int argc, char** argv) {
 
     HomPlacingState64* st = CreateHomPlacingState64(eta, slots, &boot, env_out);
     const long setup_ms = ms(t0);
-    if (print_debug) 
-        printf("  setup done in %ld ms\n", setup_ms);
-    else             
-        printf("\n[keygen] setup done in %ld ms\n", setup_ms);
+    printf("\n[keygen] setup done in %ld ms\n", setup_ms);
 
     std::vector<std::vector<int>> pempty(eta, std::vector<int>(slots, 1));
     std::vector<std::vector<std::vector<int>>> pmsg(eta, std::vector<std::vector<int>>(slots, std::vector<int>(PW, 0)));
@@ -244,7 +180,7 @@ int main(int argc, char** argv) {
         Torus64Polynomial* payload = new Torus64Polynomial(N);
         for (int j=0;j<N;++j) payload->coefs[j]=0;
         
-        // Coefficient 0 is the sort key
+        
         for (int j=0;j<PW;++j){
             symv[c][j] = (j==0) ? (((c+1)*3+1) % CMP_HALF_RANGE) : (((c+1)*3+j+1) % t);
             payload->coefs[j]=(Torus64)((uint64_t)symv[c][j]*(uint64_t)Delta);
@@ -266,7 +202,6 @@ int main(int argc, char** argv) {
     printf("\n[client:send] done in %.0f ms\n", client_send_ms);
 
     // Server:Write : selector extraction + HomPlacing, one message at a time.
-    DBG("\n[Server:Write] starts\n");
     for (int c = 0; c < party_count; ++c) {
         // STATE REFRESH: bootstrap every I every REFRESH_I messages 
         if (REFRESH_I > 0 && c > 0 && (c % REFRESH_I) == 0) {
@@ -278,8 +213,6 @@ int main(int argc, char** argv) {
                     delete ir;
                 }
         }
-        DBG("\n[msg %d] choices = {%d,%d,%d} (distinct)\n", c, choice[c][0], choice[c][1], choice[c][2]);
-
         // Server-side selector extraction (parallel)
         auto tq = Clock::now();
         std::vector<std::vector<LweSample64*>> zown(eta, std::vector<LweSample64*>(choices, nullptr));
@@ -299,12 +232,6 @@ int main(int argc, char** argv) {
         StageTimes T;
         HomPlacingPhased(st, payload_ct[c], zview, &boot, &cb_bsk, aks_fft, SSK, l_ss, env_pbs, env_out, &T);
         long hp = ms(tp); total_hp_ms += hp; agg.add(T);
-        const int ncand = slots*choices*eta;
-        DBG("  HomPlacing %ld ms   (candidates=%d, %.1f ms/candidate)\n", hp, ncand, (double)hp/ncand);
-        DBG("    p1a  AND(z,I)          parallel : %8.0f ms\n", T.p1a_and_ms);
-        DBG("    p1b  AND(zI,NOT hw)    serial   : %8.0f ms\n", T.p1b_and_ms);
-        DBG("    p2   CB + ExtProd      parallel : %8.0f ms   [CPU: CB %.0f + ExtProd %.0f]\n", T.p2_ms, T.p2_cb_cpu_ms, T.p2_extprod_cpu_ms);
-        DBG("    p3   accumulate into L serial   : %8.0f ms\n", T.p3_add_ms);
 
         bool placed=false;
         for (int k=0;k<slots && !placed;++k) 
@@ -316,7 +243,7 @@ int main(int argc, char** argv) {
                     placed=true; 
                 } 
             }
-        if (!placed) DBG(" OVERFLOW (should not happen)\n");
+        if (!placed) printf("[warning] message %d overflows its three buckets (should not happen)\n", c);
 
         for (int i=0;i<eta;++i) 
             for (int d=0; d<choices; ++d) 
@@ -325,9 +252,8 @@ int main(int argc, char** argv) {
             delete query[c][d];
         delete payload_ct[c];
     }
-    if (!print_debug) printf("[server:write] done  (selector extract %.1f s + HomPlacing %.1f s)\n", selector_ms/1000.0, total_hp_ms/1000.0);
+    printf("[server:write] done  (selector extract %.1f s + HomPlacing %.1f s)\n", selector_ms/1000.0, total_hp_ms/1000.0);
 
-    DBG("\n[sort] oblivious sort of each bucket\n");
     auto tsort = Clock::now();
 
     std::vector<double> bucket_ms(eta, 0.0);
@@ -342,22 +268,15 @@ int main(int argc, char** argv) {
     for (int i=0;i<eta;++i) 
         sort_bucket_ms += bucket_ms[i];
     sort_bucket_ms /= eta;
-    if (print_debug) 
-        printf("  sort done in %ld ms  (%d buckets on %d threads)\n", sort_ms, eta, omp_get_max_threads());
-    else             
-        printf("[sorting] done in %ld ms  (%d buckets on %d threads)\n", sort_ms, eta, omp_get_max_threads());
-    DBG("  per bucket (3 slots, serial)      : %.3f s\n", sort_bucket_ms/1000.0);
+    printf("[sorting] done in %ld ms  (%d buckets on %d threads)\n", sort_ms, eta, omp_get_max_threads());
 
-    DBG("\n[verify] MPPartialDecrypt -> Combine -> FinalPhase; compute the noise per-bucket\n");
     auto tdec = Clock::now();
     double pdec_user_ms = 0.0;   
     double combine_ms   = 0.0;   
     bool ok=true;
     bool order_ok = true; 
     int multi_buckets = 0;
-    long double nz_sumsq=0.0L; 
-    unsigned long nz_cnt=0; 
-    uint64_t nz_max=0;   
+    uint64_t nz_max=0;
     Torus64Polynomial* ph=new Torus64Polynomial(N);
     const int nparties = (int)parties.size();
     std::vector<Torus64Polynomial*> dshare(nparties);
@@ -366,7 +285,6 @@ int main(int argc, char** argv) {
     Torus64Polynomial* dsum = new Torus64Polynomial(N);
     for (int i=0;i<eta;++i) {
         std::vector<std::vector<int>> got, want;
-        std::vector<uint64_t> cell_noise(slots, 0);
         for (int k=0;k<slots;++k) {
        
             const double pd0 = now_ms();
@@ -382,21 +300,14 @@ int main(int argc, char** argv) {
             for (int j=0;j<PW;++j) 
                 v[j]=decode(ph->coefs[j]);
             got.push_back(v);
-            uint64_t w=0;
-            for (int j=0;j<N;++j){ 
+            for (int j=0;j<N;++j){
                 int sym=decode(ph->coefs[j]);
-                if (j>=PW && sym!=0) 
+                if (j>=PW && sym!=0)
                     ok=false;
                 uint64_t nm = tdist(ph->coefs[j], (Torus64)((uint64_t)sym*(uint64_t)Delta));
-                w=std::max(w, nm);
-  
-                long double e=(long double)nm; 
-                    nz_sumsq += e*e; 
-                    nz_cnt++;
-                if (nm>nz_max) 
+                if (nm>nz_max)
                     nz_max=nm; 
             }
-            cell_noise[k]=w;
             want.push_back(std::vector<int>(pmsg[i][k].begin(), pmsg[i][k].begin()+PW));
         }
         std::vector<std::vector<int>> got_s=got, want_s=want;
@@ -404,19 +315,8 @@ int main(int argc, char** argv) {
         std::sort(want_s.begin(), want_s.end());
         bool bucket_ok = (got_s==want_s);
         ok = ok && bucket_ok;
-        uint64_t worst=0; 
-        for (int k=0;k<slots;++k) 
-            worst=std::max(worst, cell_noise[k]);
-        DBG("  bucket %d  L-slots(after sort): ", i);
-        if (print_debug) 
-            for (int k=0;k<slots;++k) 
-                printf("[%d%d%d%d] ", got[k][0],got[k][1],got[k][2],got[k][3]);
-        DBG("| answer: ");
-        if (print_debug) 
-            for (auto& v: want_s) 
-                printf("[%d%d%d%d] ", v[0],v[1],v[2],v[3]);
 
-        bool asc=true; 
+        bool asc=true;
         for (int k=1;k<slots;++k) 
             if (got[k][0] < got[k-1][0]) 
                 asc=false;
@@ -425,32 +325,20 @@ int main(int argc, char** argv) {
             if (got[k][0]!=0 || got[k][1]!=0) nonzero++;
         order_ok = order_ok && asc; 
         if (nonzero>=2) multi_buckets++;
-        DBG("| MATCH ? %s | noise~2^%d (Delta/2=2^59)\n",bucket_ok?"OK":"FAIL", worst?flog2(worst):-1);
     }
     delete ph; 
     delete dsum; 
     for (int u=0;u<nparties;++u) delete dshare[u];
-    if (!print_debug) printf("[partial decryption] done in %ld ms\n", ms(tdec));
+    printf("[partial decryption] done in %ld ms\n", ms(tdec));
     (void)multi_buckets;
     ok = ok && order_ok;
 
 
-    {
-        // Noise budget
-        // decryption boundary Delta/2
-        const double sigma  = (nz_cnt ? (double)sqrtl(nz_sumsq/(long double)nz_cnt) : 0.0);
-        const double margin = (nz_max ? 59.0 - log2((double)nz_max) : 59.0);
-        printf("\n---- noise budget (payload) ------------------------------------------\n");
-        printf("    samples (coefs)            : %lu\n", nz_cnt);
-        printf("    sigma (RMS noise)          : 2^%.1f\n", sigma>0 ? log2(sigma) : 0.0);
-        printf("    max |noise| observed       : 2^%d\n", nz_max ? flog2(nz_max) : 0);
-        printf("    boundary Delta/2           : 2^59\n");
-        printf("    margin                     : %.1f bits\n", margin);
-    }
-    printf("\n  avg HomPlacing/msg = %ld ms\n", total_hp_ms / party_count);
+    // noise budget: worst payload noise over all coefficients against the decryption boundary Delta/2
+    const double noise_log = nz_max ? log2((double)nz_max) : 0.0;
+    printf("\n[noise budget] max |noise| = 2^%.1f, Delta/2 = 2^59 -> margin %.1f bits\n", noise_log, 59.0 - noise_log);
     const long dec_ms = ms(tdec);
     const double e2e_ms = now_ms() - t_e2e0;
-    const int ncand_round = slots*choices*eta*party_count;
 
     printf("\n================ END-TO-END (eta=%d, %d messages) ================\n", eta, party_count);
     printf("  setup (keygen, one-time)          : %8.1f s\n", setup_ms/1000.0);
@@ -460,17 +348,13 @@ int main(int argc, char** argv) {
     printf("  HomPlacing       (all messages)   : %8.1f s\n", total_hp_ms/1000.0);
     printf("      p1a  AND(z,I)        parallel : %8.1f s  (%4.1f%%)\n", agg.p1a_and_ms/1000.0, 100.0*agg.p1a_and_ms/total_hp_ms);
     printf("      p1b  AND(zI,NOT hw)  serial   : %8.1f s  (%4.1f%%)\n", agg.p1b_and_ms/1000.0, 100.0*agg.p1b_and_ms/total_hp_ms);
-    printf("      p2   CB + ExtProd    parallel : %8.1f s  (%4.1f%%)   [CPU: CB %.1f s + ExtProd %.1f s]\n",
-           agg.p2_ms/1000.0, 100.0*agg.p2_ms/total_hp_ms, agg.p2_cb_cpu_ms/1000.0, agg.p2_extprod_cpu_ms/1000.0);
+    printf("      p2   CB + ExtProd    parallel : %8.1f s  (%4.1f%%)\n", agg.p2_ms/1000.0, 100.0*agg.p2_ms/total_hp_ms);
     printf("      p3   accumulate      serial   : %8.1f s  (%4.1f%%)\n", agg.p3_add_ms/1000.0, 100.0*agg.p3_add_ms/total_hp_ms);
     printf("  oblivious sort                    : %8.1f s\n", sort_ms/1000.0);
     printf("  threshold decrypt + verify        : %8.1f s\n", dec_ms/1000.0);
     printf("  ======================================================\n");
     printf("  end-to-end (excluding setup)      : %8.1f s\n", e2e_ms/1000.0);
-    printf("  per message                       : %8.2f s\n", (total_hp_ms/1000.0)/party_count);
-    printf("  per candidate                     : %8.1f ms   (%d candidates in round)\n",
-           (double)total_hp_ms/ncand_round, ncand_round);
-    printf("  threads                           : %8d\n", omp_get_max_threads());
+    printf("  threads                          : %8d\n", omp_get_max_threads());
     printf("\n---- summary (eta=%d) -------------------------------------------------\n", eta);
     printf("  Client:Send      per message          : %.3f s\n", (client_send_ms/1000.0)/party_count);
     printf("  Server:Write     per message          : %.3f s\n", (total_hp_ms/1000.0)/party_count);

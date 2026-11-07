@@ -51,7 +51,6 @@ int Log2Pow2(int x) {
 }
 
 // slot -> phase: idx -> (idx + 1/2)*2^64/(2N)
-// cf) BR cuts the torus into 2N equal slots, take each slot's midpoint.
 Torus64 TorusRepAtIndex(int idx, int N) {
     const int bits = Log2Pow2(2 * N);
     const uint64_t cell = UINT64_C(1) << (64 - bits);
@@ -59,14 +58,14 @@ Torus64 TorusRepAtIndex(int idx, int N) {
 }
 
 //inverse of the above
-// phase -> slot: x ->  round(x*2N / 2^64) mod 2N 
-int ModSwitch_2N(Torus64 x, int N) {
-    const int twoN = 2 * N;
-    const int bits = Log2Pow2(twoN);
+// phase -> slot: x ->  round(x*2N / 2^64) mod 2N
+int ModSwitch_2N(Torus64 x, int N, int step = 1) {
+    const int slots = 2 * N / step;
+    const int bits = Log2Pow2(slots);
     const int shift = 64 - bits;
     const uint64_t ux = static_cast<uint64_t>(x);
     const uint64_t rounding = (shift > 0) ? (UINT64_C(1) << (shift - 1)) : 0;
-    return static_cast<int>(((ux + rounding) >> shift) & static_cast<uint64_t>(twoN - 1));
+    return static_cast<int>(((ux + rounding) >> shift) & static_cast<uint64_t>(slots - 1)) * step;
 }
 
 // (a, b) = (0, E(bit)) 
@@ -88,7 +87,6 @@ int EvalGate_FromClass(ControlBinaryGate64 gate, int sum_class) {
 }
 
 // a+b = argmin_c dist(phase, target(c))
-// Nearest-target decoding -> correct as long as the noise stays below mu (half the gap)
 int ClassifyGatePhase(Torus64 phase) {
     int best_class = 0;
     uint64_t best_dist = TorusDist64(
@@ -186,7 +184,6 @@ void MulTLWEbyMonomial(TLweSample64* out,
 }
 
 // phase += constant 
-// cf) shift by a public value, so only b moves
 void AddConst_LWEmsg(LweSample64* ct, Torus64 constant) {
     *ct->b += constant;
 }
@@ -238,7 +235,7 @@ void RunPBS(LweSample64* out,
     delete extracted;
 }
 
-// decompose one torus value into base-2^basebit
+// decompose one torus value into signed base-2^basebit digits in [-Bg/2, Bg/2), keeping the top levels*basebit bits (rounded)
 void Decomp_LWEscalar(int* digits,
                              Torus64 scalar,
                              int basebit,
@@ -246,14 +243,16 @@ void Decomp_LWEscalar(int* digits,
     assert(digits != nullptr);
     assert(basebit > 0 && basebit < 32);
     assert(levels > 0);
-    assert(levels * basebit == 64);
+    assert(levels * basebit <= 64);
 
     const uint64_t Bg = UINT64_C(1) << basebit;
-    const uint64_t state = static_cast<uint64_t>(scalar);
+    const int prec = levels * basebit;
+    uint64_t state = static_cast<uint64_t>(scalar) + ((prec < 64) ? (UINT64_C(1) << (63 - prec)) : 0);
+    for (int lev = 0; lev < levels; ++lev) state += (Bg / 2) << (64 - (lev + 1) * basebit);
 
     for (int lev = 0; lev < levels; ++lev) {
         const int shift = 64 - (lev + 1) * basebit;
-        digits[lev] = static_cast<int>((state >> shift) & (Bg - 1));
+        digits[lev] = static_cast<int>((state >> shift) & (Bg - 1)) - static_cast<int>(Bg / 2);
     }
 }
 
@@ -429,7 +428,8 @@ void BlindRotate64(
     const TLweSample64* testvec,
     const LweSample64* gate_input,
     const ControlGateBootstrappingKey64* key,
-    const Globals* env
+    const Globals* env,
+    int ms_step
 ) {
     assert(out_accum != nullptr);
     assert(testvec != nullptr);
@@ -443,12 +443,12 @@ void BlindRotate64(
     TLweSample64* next = new TLweSample64(env->N);
 
     // Initial rotation corresponding to -b
-    const int bbar = ModSwitch_2N(TorusNeg64(*gate_input->b), env->N);
+    const int bbar = ModSwitch_2N(TorusNeg64(*gate_input->b), env->N, ms_step);
     MulTLWEbyMonomial(accum, testvec, bbar, env);
 
     // Conditionally add the rotation corresponding to each a_i s_i
     for (int i = 0; i < key->input_dim; ++i) {
-        const int abar = ModSwitch_2N(gate_input->a[i], env->N);
+        const int abar = ModSwitch_2N(gate_input->a[i], env->N, ms_step);
         MulTLWEbyMonomial(rotated, accum, abar, env);
         CMuxFFT(next, key->secret_bits_fft[i], accum, rotated, env);
         CopyTLweSample64(accum, next, env);
@@ -520,8 +520,8 @@ void KS_controlbit64(
     }
 }
 
-// NOT is free in the centered encoding: -E(b) = (1-2b)*mu = E(1-b)
-// NO PBS -> no refresh noise
+
+// NOT gate
 void NOTbit64(LweSample64* out,
                        const LweSample64* in_bit,
                        const BootstrapContext64* ctx,
@@ -535,7 +535,6 @@ void NOTbit64(LweSample64* out,
 }
 
 // AND-PBS
-//The two encrypted bits are first added, so the gate can be evaluated from the encoded sum a+b in {0,1,2}
 void PBS_ANDbit64(LweSample64* out,
                        const LweSample64* lhs_bit,
                        const LweSample64* rhs_bit,
@@ -622,57 +621,59 @@ void SchemeSwitchRow_ss(TLweSample64* out_row0,
         out_row0->a[0].coefs[j]=(Torus64)((uint64_t)out_row0->a[0].coefs[j]+(uint64_t)in_row1->b->coefs[j]);
 }
 
-// LWE(bit) -> RGSW(bit) : 
-// - BR + HomTrace : higher gadget levels
-// - lower levels are obtained by scaling + SS
-// cf) The input uses centered encoding {-mu,+mu}, while the resulting RGSW ciphertext encrypts an ordinary selector bit in {0,1}.
-void CircuitBTS64_ss_mvfbs(TGswSample64* out, const LweSample64* lwe_in,
+// LWE(bit) -> RGSW(bit), multi-value
+void CircuitBTS64_ss_mvfbs(TGswSample64* out, const LweSample64* lwe_in, int in_scale,
                                         const ControlGateBootstrappingKey64* bsk, AutoKsKeyFFTa** aks_fft,
                                         const GLevCipher64* SSK, int l_ss,
                                         const Globals* env_pbs, const Globals* env_out){
-    const int N=env_out->N, bg=env_out->bgbit, k=env_out->k;
+    const int N=env_out->N, bg=env_out->bgbit, k=env_out->k, l=env_out->l;
+    int p=1; while (p<l) p<<=1;
     Torus64Polynomial* tv=new Torus64Polynomial(N); TLweSample64* testvec=new TLweSample64(N);
-    GlweCipher64* rotated=new GlweCipher64(N); GlweCipher64* base=new GlweCipher64(N);
-    
-    // constant test vector:
-    // rotation leaves +-half0 in coefficient 0 depending on the sign of the phase, and the += below turns that into {0, 1/Bg}
-    const Torus64 half0=(Torus64)(UINT64_C(1)<<(63-bg));
-    for (int j=0;j<N;++j) tv->coefs[j]=half0;
+    GlweCipher64* rotated=new GlweCipher64(N); GlweCipher64* shifted=new GlweCipher64(N); GlweCipher64* base=new GlweCipher64(N);
+    LweSample64* scaled=new LweSample64(N);
+
+    for (int j=0;j<N;++j) scaled->a[j]=(Torus64)((uint64_t)lwe_in->a[j]*(uint64_t)in_scale);
+    *scaled->b=(Torus64)((uint64_t)*lwe_in->b*(uint64_t)in_scale);
+
+    // test vector: coefficient j holds half_(j mod p) = 1/(2*Bg^(j mod p + 1)), unused slots are 0
+    for (int j=0;j<N;++j){
+        const int lev=j%p;
+        tv->coefs[j]= lev<l ? (Torus64)(UINT64_C(1)<<(63-(lev+1)*bg)) : 0;
+    }
     tLwe64NoiselessTrivial(testvec, tv, env_pbs);
-    //BR
-    BlindRotate64(rotated, testvec, lwe_in, bsk, env_pbs);        
-    // Shift {-half0,+half0} to {0, 1/Bg}.
-    rotated->b->coefs[0]=(Torus64)((uint64_t)rotated->b->coefs[0]+(uint64_t)half0);
-    // HomTrace -> RLWE(mu*g_out[0])
-    RevHomTrace_Alg5_fft(base, rotated, aks_fft, 1, env_out);                       
-    for (int i=0;i<env_out->l;++i){
-        
-        const int bits=i*bg;       
-        // scale base down to level i                                                 
+    //BR, phase rounded to multiples of p
+    BlindRotate64(rotated, testvec, scaled, bsk, env_pbs, p);
+    for (int i=0;i<l;++i){
+        const Torus64 half_i=(Torus64)(UINT64_C(1)<<(63-(i+1)*bg));
+        // coefficient i -> 0, then shift {-half_i,+half_i} to {0, 1/Bg^(i+1)}
+        MulTLWEbyMonomial(shifted, rotated, -i, env_out);
+        shifted->b->coefs[0]=(Torus64)((uint64_t)shifted->b->coefs[0]+(uint64_t)half_i);
+        // HomTrace -> RLWE(mu*g_out[i])
+        RevHomTrace_Alg5_fft(base, shifted, aks_fft, 1, env_out);
         for (int q=0;q<=k;++q) for (int j=0;j<N;++j)
-            out->samples[1][i].a[q].coefs[j]=modswitch_down_Torus64(base->a[q].coefs[j], bits);
+            out->samples[1][i].a[q].coefs[j]=base->a[q].coefs[j];
         SchemeSwitchRow_ss(&out->samples[0][i], &out->samples[1][i], SSK, l_ss, env_out);
     }
-    delete tv; delete testvec; delete rotated; delete base;
+    delete tv; delete testvec; delete rotated; delete shifted; delete base; delete scaled;
 }
 
 // Generate an output KSK with an explicit decomposition base
 // Each entry encrypts a gadget-scaled input-secret coefficient under the reduced control key supported on the first target_dim coordinates.
 void Gen_OutputKSK_Basebit64( ControlOutputKeySwitchKey64* key,
                               const std::vector<MPPartyKey64>& parties,
-                            int input_dim, int target_dim, int basebit,
+                            int input_dim, int target_dim, int basebit, int levels,
                             double stdev, const Globals* env
 ) {
     assert(key != nullptr);
     assert(input_dim >= 0 && input_dim <= env->N);
     assert(target_dim >= 0 && target_dim <= env->N);
-    assert(basebit > 0 && 64 % basebit == 0);
+    assert(basebit > 0 && levels > 0 && levels * basebit <= 64);
 
     Del_OutputKSK64(key);
 
     key->input_dim  = input_dim;
     key->target_dim = target_dim;
-    key->levels     = 64 / basebit;
+    key->levels     = levels;
     key->basebit    = basebit;
     key->identity   = false;
     key->entries.assign(input_dim, std::vector<LweSample64*>(key->levels, nullptr));

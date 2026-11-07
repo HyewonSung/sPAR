@@ -31,6 +31,8 @@ Globals::Globals(int N_in,
     for (int p = 0; p < l; ++p) {
         offset += (UINT64_C(1) << (64 - (p + 1) * bgbit)) * halfBg;
     }
+    // round to the kept precision instead of truncating (zero-mean decomposition error)
+    if (l * bgbit < 64) offset += UINT64_C(1) << (63 - l * bgbit);
     torusDecompOffset = offset;
 }
 

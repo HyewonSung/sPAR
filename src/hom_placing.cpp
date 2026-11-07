@@ -143,24 +143,21 @@ void HomPlacingPhased(
 
     // ---- Phase 2 (PARALLEL): write[t] = CircuitBootstrap(h[t])*(payload ciphertext) ----
     const int kpl = (env->k + 1) * env->l;
+    // h is +-mu; scale it to +-1/4 so the multi-value CB has the widest margin to the sign boundaries
+    const int cb_in_scale = (int)((UINT64_C(1) << 62) / (uint64_t)EncodeControlBitToTorus64(1));
     const double t_2 = now_ms();
-    double cb_cpu = 0, extprod_cpu = 0;
-    #pragma omp parallel for schedule(dynamic) reduction(+:cb_cpu,extprod_cpu)
+    #pragma omp parallel for schedule(dynamic)
     for (int t=0;t<total_loop;++t) {
-        const double c0 = now_ms();
         TGswSample64* cb = new TGswSample64(env->l, N);
-        CircuitBTS64_ss_mvfbs(cb, h[t], cb_bsk, aks_fft, SSK, l_ss, env_pbs, env); //cb=bootstrapped RGSW(h)
-        const double c1 = now_ms(); cb_cpu += c1 - c0;
+        CircuitBTS64_ss_mvfbs(cb, h[t], cb_in_scale, cb_bsk, aks_fft, SSK, l_ss, env_pbs, env); //cb=bootstrapped RGSW(h)
         TGswSampleFFTa* cb_fft = new TGswSampleFFTa(env->l, N);
         for (int p=0;p<kpl;++p) 
             for (int q=0;q<=env->k;++q)
                 TorusPolynomial64_ifft_lvl2(&cb_fft->allsamples[p].a[q], &cb->allsamples[p].a[q], env);
         ExternalProductFFT(write[t], cb_fft, payload_ct, env);          // RLWE(h * payload)
         delete cb_fft; delete cb;
-        extprod_cpu += now_ms() - c1;
     }
     T->p2_ms = now_ms() - t_2;
-    T->p2_cb_cpu_ms = cb_cpu; T->p2_extprod_cpu_ms = extprod_cpu;
 
     // ---- Phase 3 (SERIAL): accumulate into the bucket array ----
     const double t_3 = now_ms();

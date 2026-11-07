@@ -77,7 +77,8 @@ void BlindRotate64(TLweSample64* out_accum,
                                      const TLweSample64* testvec,
                                      const LweSample64* gate_input,
                                      const ControlGateBootstrappingKey64* key,
-                                     const Globals* env);
+                                     const Globals* env,
+                                     int ms_step = 1);
 
 void SampleExtract_AtZero64(LweSample64* out,
                                   const TLweSample64* in_accum,
@@ -108,7 +109,7 @@ void GadgetProd_RLWE_ss(TLweSample64* out, const Torus64Polynomial* a_poly,
                           const GLevCipher64* SSK, int l_ss, const Globals* env);
 void SchemeSwitchRow_ss(TLweSample64* out_row0, const TLweSample64* in_row1,
                         const GLevCipher64* SSK, int l_ss, const Globals* env);
-void CircuitBTS64_ss_mvfbs(TGswSample64* out, const LweSample64* lwe_in,
+void CircuitBTS64_ss_mvfbs(TGswSample64* out, const LweSample64* lwe_in, int in_scale,
                                  const ControlGateBootstrappingKey64* bsk, AutoKsKeyFFTa** aks_fft,
                                  const GLevCipher64* SSK, int l_ss,
                                  const Globals* env_pbs, const Globals* env_out);
@@ -116,4 +117,4 @@ void CircuitBTS64_ss_mvfbs(TGswSample64* out, const LweSample64* lwe_in,
 // Output key-switching key N -> n with an explicit gadget base.
 void Gen_OutputKSK_Basebit64(
     ControlOutputKeySwitchKey64* ksk, const std::vector<MPPartyKey64>& parties,
-    int input_dim, int target_dim, int basebit, double stdev, const Globals* env);
+    int input_dim, int target_dim, int basebit, int levels, double stdev, const Globals* env);

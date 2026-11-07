@@ -155,6 +155,14 @@ void FFT_Processor_Spqlios::execute_direct_torus64(int64_t* res, const double* a
     }
 }
 
+// same as execute_direct_torus64 but rounds to nearest instead of truncating (for exact limb products)
+void FFT_Processor_Spqlios::execute_direct_torus64_round(int64_t* res, const double* a) {
+    const double _2sN = double(2)/double(N);
+    for (int i=0; i<N; i++) real_inout_direct[i]=a[i]*_2sN;
+    fft(tables_direct,real_inout_direct);
+    for (int i=0; i<N; i++) res[i]=(int64_t)llrint(real_inout_direct[i]);
+}
+
 FFT_Processor_Spqlios::~FFT_Processor_Spqlios() {
     
     

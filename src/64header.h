@@ -321,6 +321,12 @@ void TorusPolynomial64_fft_lvl2(Torus64Polynomial* result, const LagrangeHalfCPo
     fftp2048_execute_direct_torus64(result->coefs, source->values);
 }
 
+// round-to-nearest variant, for products known to be integers below 2^53
+void TorusPolynomial64_fft_round_lvl2(Torus64Polynomial* result, const LagrangeHalfCPolynomiala* source, const Globals* env) {
+    assert(env->N==2048);
+    fftp2048.execute_direct_torus64_round(result->coefs, source->values);
+}
+
 void TorusPolynomial64_ifft_lvl2(LagrangeHalfCPolynomiala* result, const Torus64Polynomial* source, const Globals* env) {
     assert(env->N==2048);
     fftp2048_execute_reverse_torus64(result->values, source->coefs);
@@ -352,6 +358,10 @@ void TorusPolynomial64_fft_lvl2(Torus64Polynomial* result, const LagrangeHalfCPo
     assert(env->N==2048);
     assert(source->torus64Poly!=0);
     for (int i=0; i<2048; i++) result->coefs[i]=source->torus64Poly->coefs[i];
+}
+
+void TorusPolynomial64_fft_round_lvl2(Torus64Polynomial* result, const LagrangeHalfCPolynomiala* source, const Globals* env) {
+    TorusPolynomial64_fft_lvl2(result, source, env);
 }
 
 void TorusPolynomial64_ifft_lvl2(LagrangeHalfCPolynomiala* result, const Torus64Polynomial* source, const Globals* env) {
@@ -436,6 +446,7 @@ static void tGswTorus64PolynomialDecompH_explicit_l(
     uint64_t offset = 0;
     for (int p = 0; p < l; ++p)
         offset += (UINT64_C(1) << (64 - (p + 1) * Bgbit)) * (uint64_t)halfBg;
+    if (l * Bgbit < 64) offset += UINT64_C(1) << (63 - l * Bgbit);   // round, not truncate
     static thread_local std::vector<uint64_t> tl_buf_l;
     if ((int)tl_buf_l.size() < N) tl_buf_l.resize(N);
     uint64_t* buf = tl_buf_l.data();
@@ -1138,21 +1149,23 @@ void glwe_encrypt_poly_scaled_level_evalkey(
     const uint64_t scale = UINT64_C(1) << (64 - (level + 1) * Bgbit);
 
     for (int j = 0; j < N; ++j) {
-        ct->a[0].coefs[j] = 0;
+        ct->a[0].coefs[j] = random_int64();   // uniform mask
         if (k >= 1) ct->a[1].coefs[j] = 0;
 
         Torus64 m_scaled = (Torus64)msg->coefs[j] * (Torus64)scale;
 
-        
+
 
         double e_real = sample_gaussian(stdev);
 
-        long double w = (long double)e_real * (long double)((unsigned long long)1 << 63);
+        long double w = ldexpl((long double)e_real, 64);   // torus -> Torus64 is x2^64
         Torus64 e_torus = (Torus64) llround(w);
 
-        
+
         ct->b->coefs[j] = m_scaled + e_torus;
     }
+    // b = a*s + m*g_level + e
+    torus64PolynomialMultAddKaratsuba_lvl2(ct->b, env->tlwekey, &ct->a[0], env);
 }
 
 
@@ -1175,22 +1188,21 @@ const Globals* env
 }
 
 
-AutoKsKey64* AutoKsKeyGen64(const Globals* env, int d, int aks_l = -1) {
+AutoKsKey64* AutoKsKeyGen64(const Globals* env, int d, int aks_l, double stdev) {
     const int N = env->N;
     const int l = (aks_l > 0) ? aks_l : env->l;
 
     const IntPolynomiala* S = env->tlwekey;
 
-    
+
     IntPolynomiala* S_d = new IntPolynomiala(N);
     tau_d_secret(S_d, S, d, env);
 
-    
+
     AutoKsKey64* aks = new AutoKsKey64(d, l, N);
 
-    
-double ks_stdev = pow(2.,-55);
-GLevEncryptPoly(aks->glev, S_d, ks_stdev, env);
+
+GLevEncryptPoly(aks->glev, S_d, stdev, env);
 
     delete S_d;
     return aks;
@@ -1226,9 +1238,14 @@ void GLWE_KS_only(
         
         torus64PolynomialMultKaratsuba_lvl2(tmp, &decomp[p], kct->b, env);
 
-        
+
         for (int j = 0; j < N; ++j)
             out->b->coefs[j] -= tmp->coefs[j];
+
+        // mask part: out.a -= decomp_p * A_p
+        torus64PolynomialMultKaratsuba_lvl2(tmp, &decomp[p], &kct->a[0], env);
+        for (int j = 0; j < N; ++j)
+            out->a[0].coefs[j] -= tmp->coefs[j];
     }
 
     delete_array1<IntPolynomiala>(decomp);
@@ -1327,7 +1344,7 @@ inline int int_log2(int x) {
 }
 
 
-AutoKsKey64** AutoKsKeyGenAll(const Globals* env, int n, int aks_l = -1) {
+AutoKsKey64** AutoKsKeyGenAll(const Globals* env, int n, int aks_l, double stdev) {
     const int N    = env->N;
     const int logN = int_log2(N);
     const int logn = int_log2(n);
@@ -1338,7 +1355,7 @@ AutoKsKey64** AutoKsKeyGenAll(const Globals* env, int n, int aks_l = -1) {
     for (int i = 0; i < num_k; ++i) {
         int k = logn + 1 + i;
         int d = (1 << k) + 1;
-        aks_list[i] = AutoKsKeyGen64(env, d, aks_l);
+        aks_list[i] = AutoKsKeyGen64(env, d, aks_l, stdev);
     }
     return aks_list;
 }
@@ -1487,20 +1504,66 @@ void RevHomTrace_Alg5(
 struct AutoKsKeyFFTa {
     int d;
     int l;
-    LagrangeHalfCPolynomiala* glev_b_fft;
+    // key (A_p, B_p) split into signed 32-bit limbs: X = X_hi*2^32 + X_lo,
+    // so that every FFT product stays below 2^53 and is exact
+    LagrangeHalfCPolynomiala* glev_bhi_fft;
+    LagrangeHalfCPolynomiala* glev_blo_fft;
+    LagrangeHalfCPolynomiala* glev_ahi_fft;
+    LagrangeHalfCPolynomiala* glev_alo_fft;
 
     AutoKsKeyFFTa(int d_in, int l_in, int N)
-        : d(d_in), l(l_in), glev_b_fft(new_array1<LagrangeHalfCPolynomiala>(l_in, N)) {}
+        : d(d_in), l(l_in),
+          glev_bhi_fft(new_array1<LagrangeHalfCPolynomiala>(l_in, N)),
+          glev_blo_fft(new_array1<LagrangeHalfCPolynomiala>(l_in, N)),
+          glev_ahi_fft(new_array1<LagrangeHalfCPolynomiala>(l_in, N)),
+          glev_alo_fft(new_array1<LagrangeHalfCPolynomiala>(l_in, N)) {}
 
-    ~AutoKsKeyFFTa() { delete_array1<LagrangeHalfCPolynomiala>(glev_b_fft); }
+    ~AutoKsKeyFFTa() {
+        delete_array1<LagrangeHalfCPolynomiala>(glev_bhi_fft); delete_array1<LagrangeHalfCPolynomiala>(glev_blo_fft);
+        delete_array1<LagrangeHalfCPolynomiala>(glev_ahi_fft); delete_array1<LagrangeHalfCPolynomiala>(glev_alo_fft);
+    }
 };
+
+static void SplitLimbsToFFT(LagrangeHalfCPolynomiala* hi_fft, LagrangeHalfCPolynomiala* lo_fft,
+                            const Torus64Polynomial* x, const Globals* env) {
+    const int N = env->N;
+    Torus64Polynomial hi(N), lo(N);
+    for (int j = 0; j < N; ++j) {
+        const int64_t l32 = (int64_t)(int32_t)(uint32_t)(uint64_t)x->coefs[j];
+        lo.coefs[j] = l32;
+        hi.coefs[j] = (int64_t)((uint64_t)x->coefs[j] - (uint64_t)l32) >> 32;
+    }
+    TorusPolynomial64_ifft_lvl2(hi_fft, &hi, env);
+    TorusPolynomial64_ifft_lvl2(lo_fft, &lo, env);
+}
 
 static AutoKsKeyFFTa* AutoKsKeyToFFT(const AutoKsKey64* aks, const Globals* env) {
     const int key_l = aks->glev->l;
     AutoKsKeyFFTa* aks_fft = new AutoKsKeyFFTa(aks->d, key_l, env->N);
-    for (int p = 0; p < key_l; ++p)
-        TorusPolynomial64_ifft_lvl2(&aks_fft->glev_b_fft[p], (*aks->glev)[p]->b, env);
+    for (int p = 0; p < key_l; ++p) {
+        SplitLimbsToFFT(&aks_fft->glev_bhi_fft[p], &aks_fft->glev_blo_fft[p], (*aks->glev)[p]->b, env);
+        SplitLimbsToFFT(&aks_fft->glev_ahi_fft[p], &aks_fft->glev_alo_fft[p], &(*aks->glev)[p]->a[0], env);
+    }
     return aks_fft;
+}
+
+// acc = sum_p decomp_p * (hi_p*2^32 + lo_p) mod 2^64, computed exactly
+static void LimbGadgetProd(Torus64Polynomial* acc, const LagrangeHalfCPolynomiala* decompFFT,
+                           const LagrangeHalfCPolynomiala* hi_fft, const LagrangeHalfCPolynomiala* lo_fft,
+                           int l, const Globals* env) {
+    const int N = env->N;
+    LagrangeHalfCPolynomiala accFFT(N);
+    Torus64Polynomial acc_lo(N);
+    LagrangeHalfCPolynomialClear_lvl2(&accFFT, env);
+    for (int p = 0; p < l; ++p)
+        LagrangeHalfCPolynomialAddMul_lvl2(&accFFT, &decompFFT[p], &hi_fft[p], env);
+    TorusPolynomial64_fft_round_lvl2(acc, &accFFT, env);
+    LagrangeHalfCPolynomialClear_lvl2(&accFFT, env);
+    for (int p = 0; p < l; ++p)
+        LagrangeHalfCPolynomialAddMul_lvl2(&accFFT, &decompFFT[p], &lo_fft[p], env);
+    TorusPolynomial64_fft_round_lvl2(&acc_lo, &accFFT, env);
+    for (int j = 0; j < N; ++j)
+        acc->coefs[j] = (Torus64)(((uint64_t)acc->coefs[j] << 32) + (uint64_t)acc_lo.coefs[j]);
 }
 
 static AutoKsKeyFFTa** AutoKsKeyAllToFFT(AutoKsKey64** aks_list, const Globals* env, int n) {
@@ -1533,19 +1596,17 @@ static void GLWE_KS_only_fft(TLweSample64* out, const TLweSample64* in,
 
     IntPolynomiala* decomp = new_array1<IntPolynomiala>(l, N);
     LagrangeHalfCPolynomiala* decompFFT = new_array1<LagrangeHalfCPolynomiala>(l, N);
-    LagrangeHalfCPolynomiala accFFT(N);
     Torus64Polynomial acc(N);
 
     tGswTorus64PolynomialDecompH_explicit_l(decomp, &in->a[0], N, l, env->bgbit);
     for (int p = 0; p < l; ++p)
         IntPolynomial_ifft_lvl2(&decompFFT[p], &decomp[p], env);
 
-    LagrangeHalfCPolynomialClear_lvl2(&accFFT, env);
-    for (int p = 0; p < l; ++p)
-        LagrangeHalfCPolynomialAddMul_lvl2(&accFFT, &decompFFT[p], &aks_fft->glev_b_fft[p], env);
-    TorusPolynomial64_fft_lvl2(&acc, &accFFT, env);
-
+    // out = (0, b) - sum_p decomp_p * (A_p, B_p)
+    LimbGadgetProd(&acc, decompFFT, aks_fft->glev_bhi_fft, aks_fft->glev_blo_fft, l, env);
     for (int j = 0; j < N; ++j) out->b->coefs[j] -= acc.coefs[j];
+    LimbGadgetProd(&acc, decompFFT, aks_fft->glev_ahi_fft, aks_fft->glev_alo_fft, l, env);
+    for (int j = 0; j < N; ++j) out->a[0].coefs[j] -= acc.coefs[j];
 
     delete_array1<IntPolynomiala>(decomp);
     delete_array1<LagrangeHalfCPolynomiala>(decompFFT);

@@ -30,7 +30,8 @@ void HomCompareSwap(TLweSample64*& key_a, TLweSample64*& val_a,
     KS_controlbit64(diff_n_dim, diff, ksk, env);
     TGswSample64* swap_condition_bsk = new TGswSample64(env->l, N);
     // obtain RGSW swap bit : result of comparison
-    CircuitBTS64_ss_mvfbs(swap_condition_bsk, diff_n_dim, cb_bsk, aks_fft, SSK, l_ss, env_pbs, env);
+    // key differences are multiples of Delta = 1/16, so the input cannot be scaled up (in_scale = 1)
+    CircuitBTS64_ss_mvfbs(swap_condition_bsk, diff_n_dim, 1, cb_bsk, aks_fft, SSK, l_ss, env_pbs, env);
     TGswSampleFFTa* swap_condition_fft = new TGswSampleFFTa(env->l, N);
     for (int p = 0; p < kpl; ++p)
         for (int q = 0; q <= env->k; ++q)
@@ -68,8 +69,7 @@ void HomCompareSwap(TLweSample64*& key_a, TLweSample64*& val_a,
     delete diff_n_dim; delete diff; delete kb; delete ka;
 }
 
-// Oblivious Sorting : the compared positions are fixed and public, while all comparison outcomes and data movements remain encrypted.
-// The server cannot learn the ordering before or after the oblivious sorting.
+
 void ObliviousSorting(std::vector<TLweSample64*>& K, std::vector<TLweSample64*>& V,
                                const ControlGateBootstrappingKey64* cb_bsk,
                                AutoKsKeyFFTa** aks_fft, const GLevCipher64* SSK, int l_ss,

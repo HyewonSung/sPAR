@@ -26,6 +26,7 @@ class FFT_Processor_Spqlios {
     void execute_direct_torus32(int32_t* res, const double* a);
     void execute_reverse_torus64(double* res, const int64_t* a);
     void execute_direct_torus64(int64_t* res, const double* a);
+    void execute_direct_torus64_round(int64_t* res, const double* a);
 
     ~FFT_Processor_Spqlios();
 };
